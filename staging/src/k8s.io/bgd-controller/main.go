@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"time"
@@ -43,6 +44,11 @@ var (
 
 func createReplicaSetsAndService(bgd *demov1.BlueGreenDeployment, kubeClient *kubernetes.Clientset) error {
 	rsClient := kubeClient.ExtensionsV1beta1().ReplicaSets(bgd.Namespace)
+	encodedPodTemplateSpec, err := json.Marshal(bgd.Spec.Template.Spec)
+	if err != nil {
+		return fmt.Errorf("failed to encode bgd pod template spec: %v", err)
+	}
+	encodedPodTemplateSpecStr := fmt.Sprintf("%s", encodedPodTemplateSpec)
 
 	// create blue RS if it doesn't exist
 	blueRS, err := rsClient.Create(newReplicaSet("blue-rs", "blue", bgd, false))
@@ -50,6 +56,7 @@ func createReplicaSetsAndService(bgd *demov1.BlueGreenDeployment, kubeClient *ku
 		return fmt.Errorf("failed to create blue RS: %v", err)
 	} else if err == nil {
 		fmt.Printf("created blue RS\n\n")
+		blueRS.Annotations[bgdPodTemplateSpecAnnotation] = encodedPodTemplateSpecStr
 		activeRS = blueRS
 	}
 
@@ -59,6 +66,7 @@ func createReplicaSetsAndService(bgd *demov1.BlueGreenDeployment, kubeClient *ku
 		return fmt.Errorf("failed to create green RS: %v", err)
 	} else if err == nil {
 		fmt.Printf("created green RS\n\n")
+		greenRS.Annotations[bgdPodTemplateSpecAnnotation] = encodedPodTemplateSpecStr
 		inactiveRS = greenRS
 	}
 
@@ -78,7 +86,7 @@ func createReplicaSetsAndService(bgd *demov1.BlueGreenDeployment, kubeClient *ku
 // 2. create and scale up the new RS
 // 3. point the service to the new RS
 // 4. scale down previous active RS to make it inactive
-func createNewActiveRSAndReplaceInactiveRS(bgd *demov1.BlueGreenDeployment, kubeClient *kubernetes.Clientset) error {
+func createNewActiveRSToReplaceInactiveRS(bgd *demov1.BlueGreenDeployment, kubeClient *kubernetes.Clientset) error {
 	rsClient := kubeClient.ExtensionsV1beta1().ReplicaSets(bgd.Namespace)
 	newActiveRSName := inactiveRS.Name
 	newActiveRSColor := inactiveRS.Spec.Template.Labels["color"]
@@ -103,6 +111,12 @@ func createNewActiveRSAndReplaceInactiveRS(bgd *demov1.BlueGreenDeployment, kube
 		return fmt.Errorf("failed to scale up new RS %q: %v", newRS.Name, err)
 	}
 
+	encodedPodTemplateSpec, err := json.Marshal(bgd.Spec.Template.Spec)
+	if err != nil {
+		return fmt.Errorf("failed to encode bgd pod template spec: %v", err)
+	}
+	newActiveRS.Annotations[bgdPodTemplateSpecAnnotation] = fmt.Sprintf("%s", encodedPodTemplateSpec)
+
 	svc, err = updateService(svc.Name, bgd.Namespace, kubeClient, func(service *corev1.Service) {
 		updatedLabels := newActiveRS.Spec.Template.Labels
 		service.Labels = updatedLabels
@@ -116,6 +130,7 @@ func createNewActiveRSAndReplaceInactiveRS(bgd *demov1.BlueGreenDeployment, kube
 	if err != nil {
 		return fmt.Errorf("failed to scale down active RS %q: %v", activeRS.Name, err)
 	}
+	newInactiveRS.Annotations[bgdPodTemplateSpecAnnotation] = activeRS.Annotations[bgdPodTemplateSpecAnnotation]
 
 	activeRS = newActiveRS
 	inactiveRS = newInactiveRS
@@ -132,6 +147,7 @@ func switchToInactiveRS(bgd *demov1.BlueGreenDeployment, kubeClient *kubernetes.
 	if err != nil {
 		return fmt.Errorf("failed to scale up inactive RS %q: %v", inactiveRS.Name, err)
 	}
+	newActiveRS.Annotations[bgdPodTemplateSpecAnnotation] = inactiveRS.Annotations[bgdPodTemplateSpecAnnotation]
 
 	svc, err = updateService(svc.Name, bgd.Namespace, kubeClient, func(service *corev1.Service) {
 		updatedLabels := newActiveRS.Spec.Template.Labels
@@ -146,6 +162,7 @@ func switchToInactiveRS(bgd *demov1.BlueGreenDeployment, kubeClient *kubernetes.
 	if err != nil {
 		return fmt.Errorf("failed to scale down active RS %q: %v", activeRS.Name, err)
 	}
+	newInactiveRS.Annotations[bgdPodTemplateSpecAnnotation] = activeRS.Annotations[bgdPodTemplateSpecAnnotation]
 
 	activeRS = newActiveRS
 	inactiveRS = newInactiveRS
@@ -154,7 +171,6 @@ func switchToInactiveRS(bgd *demov1.BlueGreenDeployment, kubeClient *kubernetes.
 }
 
 func syncReplicaSetsAndService(bgd *demov1.BlueGreenDeployment, kubeClient *kubernetes.Clientset) error {
-	podTemplateSpec := bgd.Spec.Template.Spec
 	rss, err := kubeClient.ExtensionsV1beta1().ReplicaSets(bgd.Namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get RSs: %v", err)
@@ -165,12 +181,17 @@ func syncReplicaSetsAndService(bgd *demov1.BlueGreenDeployment, kubeClient *kube
 		return createReplicaSetsAndService(bgd, kubeClient)
 	}
 
+	encodedPodTemplateSpec, err := json.Marshal(bgd.Spec.Template.Spec)
+	if err != nil {
+		return fmt.Errorf("failed to encode bgd pod template spec: %v", err)
+	}
+	encodedPodTemplateSpecStr := fmt.Sprintf("%s", encodedPodTemplateSpec)
+
 	// check whether both current active RS and the BGD object have the same pod template spec
-	podTemplateSpecStr := fmt.Sprintf("%s", podTemplateSpec)
-	if activeRS.Annotations["demo.google.com/bgd-pod-template-spec"] != podTemplateSpecStr {
-		fmt.Printf("pod template spec changed\n\n")
-		if inactiveRS.Annotations["demo.google.com/bgd-pod-template-spec"] != podTemplateSpecStr {
-			return createNewActiveRSAndReplaceInactiveRS(bgd, kubeClient)
+	if activeRS.Annotations[bgdPodTemplateSpecAnnotation] != encodedPodTemplateSpecStr {
+		fmt.Printf("bgd pod template spec changed\n\n")
+		if inactiveRS.Annotations[bgdPodTemplateSpecAnnotation] != encodedPodTemplateSpecStr {
+			return createNewActiveRSToReplaceInactiveRS(bgd, kubeClient)
 		} else {
 			return switchToInactiveRS(bgd, kubeClient)
 		}

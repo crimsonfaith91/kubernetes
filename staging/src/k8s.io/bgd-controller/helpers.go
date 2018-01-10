@@ -53,7 +53,7 @@ func newReplicaSet(name, color string, obj *demov1.BlueGreenDeployment, isInacti
 				}),
 			},
 			Annotations: map[string]string{
-				bgdPodTemplateSpecAnnotation: fmt.Sprintf("%s", obj.Spec.Template.Spec),
+				bgdPodTemplateSpecAnnotation: "",
 			},
 		},
 		Spec: extensionsv1beta1.ReplicaSetSpec{
