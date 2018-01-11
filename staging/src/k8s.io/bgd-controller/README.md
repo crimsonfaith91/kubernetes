@@ -1,6 +1,6 @@
 # Blue-Green Deployment controller
 
-**This is not an actual Google product**
+**This is not an official Google product**
 
 This repository implements a simple blue-green deployment controller using a CustomResourceDefinition (CRD). The controller maintains 2 replicasets (blue and green) all the time, alternating between the colors for new rollouts.
 
